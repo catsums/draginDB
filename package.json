@@ -1,0 +1,17 @@
+{
+  "name": "dragindb",
+  "version": "1.0.0",
+  "description": "A cache-based JSON database that allows you to quickly create, access and change it as if you're dragging it in quickly. Start Dragin Deez Bases with DraginBD now!",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest"
+  },
+  "keywords": [
+    "database",
+    "json",
+    "cache",
+    "nosql"
+  ],
+  "author": "catsums",
+  "license": "ISC"
+}
