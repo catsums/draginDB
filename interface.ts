@@ -168,5 +168,52 @@ export interface IDBConnection {
 export interface IResponse<T=any> {
 	success: boolean;
 	message: string;
-	data: T;
+	data?: T;
+	sync?: {
+		id: string | number;
+		time: number;
+	}
+}
+
+export enum SocketEvent {
+	Connect = "connect",
+	Disconnect = "disconnect",
+	Open = "open",
+	Close = "close",
+	Create = "create",
+	Read = "read",
+	Update = "update",
+	Delete = "delete",
+}
+export enum SocketClientEvent {
+	Open = "clientOpen",
+	Close = "clientClose",
+	CreatePack = "clientCreatePack",
+	DeletePack = "clientDeletePack",
+	CreateRec = "clientCreateRec",
+	ReadRec = "clientReadRec",
+	UpdateRec = "clientUpdateRec",
+	DeleteRec = "clientDeleteRec",
+}
+
+export interface IRequest {
+	type: string;
+	key?: string;
+	id?: string;
+	time: number;
+	data?: IObject;
+}
+
+export type ResponseCallbackType = (err: Error, response?: IResponse) => void;
+
+export const DefaultResponseCallback:ResponseCallbackType = (err,res) => {};
+
+export async function request(url, req:IRequest) : Promise<IResponse>{
+	let res = await fetch(url, {
+		body: JSON.stringify(req),
+	});
+
+	let obj = await res.json();
+
+	return obj as IResponse;
 }
