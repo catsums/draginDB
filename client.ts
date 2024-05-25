@@ -1,5 +1,7 @@
-import _ from "lodash";
+import _, { set } from "lodash";
 import * as MY from "@catsums/my";
+
+import { io, Socket } from "socket.io-client";
 
 import { 
 	IIndex, IDatabase, 
@@ -8,28 +10,11 @@ import {
 	IDType, PathType, DBDataType,
 	IDBConnection,
 	IResponse,
+	SocketClientEvent, SocketEvent, DefaultResponseCallback,
 } from './interface';
 
-interface IRequest {
-	type: string;
-	key?: string;
-	id?: string;
-	time: number;
-	data?: IObject;
-}
-
-type ResponseCallbackType = (err: Error, response?: IResponse) => void;
-
-const DefaultResponseCallback:ResponseCallbackType = (err,res) => {};
-
-async function request(url, req:IRequest) : Promise<IResponse>{
-	let res = await fetch(url, {
-		body: JSON.stringify(req),
-	});
-
-	let obj = await res.json();
-
-	return obj as IResponse;
+function verifySync(idA, idB){
+	return (idA === idB);
 }
 
 export class DBClient{
@@ -40,71 +25,143 @@ export class DBClient{
 	private _url: string = "";
 	private _db:string = "";
 
+	private socket:Socket;
+
 	private _sync = {
 		time: -1,
 	}
+
+	get id(){ return this._id; }
+	get key(){ return this._key; }
+	get url(){ return this._url; }
+	get dbName(){ return this._db; }
+	get ip(){ return this._ip; }
+
+	get syncTime(){ return this._sync.time; }
+	get clientSocket(){ return this.socket; }
 
 	constructor(url){
 		this._url = url;
 	}
 
-	db(){
-		return new DBClientDatabase(this._db, this, {
-			id: this._id,
-			key: this._key,
-
-			ip: this._ip,
-			url: this._url,
-			sync: this._sync,
-		});
+	db(name = this.dbName){
+		return new DBClientDatabase(name, this);
 	}
 
-	async connect({
+	connect({
 		db, url=this._url, username="", password="",
-	}:{db:string, url?:string, username?:string, password?:string}){
-		let res = await request(url, {
-				type: `connect`,
-				time: Date.now(),
-				data: {
-					username,
-					password,
-					db,
-				}
-		});
-
-		if(!res.success){
-			throw new Error(res.message);
+	}:{db:string, url?:string, username?:string, password?:string}, callback = DefaultResponseCallback){
+		let setData = ({id, key, ip, sync, db, socket}) => {
+			this._id = id;
+			this._key = key;
+			this._ip = ip;
+			this._sync.time = sync.time;
+			this._db = db;
+			this.socket = socket;
 		}
 
-		let data = res.data;
+		return new Promise((resolve, reject) => {
+			let socket:Socket;
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
+			function onConnect(){
+				socket.emit(SocketClientEvent.Open, JSON.stringify({
+					username, password, db,
+					sync,
+				}));
+			}
 
-		this._id = data.id;
-		this._key = data.key;
+			function onOpen(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+			
+					let data = res.data;
+	
+					setData({
+						id: data.id,
+						key: data.key,
+						db: data.db,
+						ip: data.ip,
+						sync: data.sync,
+						socket,
+					});
 
-		this._ip = data.ip;
-		this._sync.time = data.sync.time;
+					callback(null, this);
+					resolve(this);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
 
-		this._db = db;
+			function onDisconnect(){
+				setData({
+					id:"", key:"", db:"", ip:"", sync:{time:-1}, socket,
+				});
+			}
+
+			try{
+				socket = io(`${url}`);
+
+				socket
+				.on(SocketEvent.Connect, onConnect)
+				.on(SocketEvent.Open, onOpen)
+				.on(SocketEvent.Disconnect, onDisconnect)
+
+			}catch(err){
+				callback(err);
+				reject(err);
+			}
+		});
+
+
 	}
 
-	async close(){
-		let res = await request(this._url, {
-			type: `close`,
-			time: Date.now(),
-			key: this._key,
-			id: this._id,
+	close(callback = DefaultResponseCallback){
+		let socket = this.socket;
+		return new Promise((resolve, reject) => {
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
+			function onClose(str:string){
+				try{
+					let res = JSON.parse(str);
+
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+
+					callback(null, res);
+					resolve(res);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket
+				.emit(SocketClientEvent.Close, JSON.stringify({
+					id: this._id, key: this._key,
+					sync,
+				}))
+				.on(SocketEvent.Disconnect, onClose);
+			}catch(err){
+				callback(err);
+				reject(err);
+			}
 		});
-
-		if(!res.success){
-			throw new Error(res.message);
-		}
-
-		this._id = "";
-		this._key = "";
-
-		this._ip = "";
-		this._db = "";
-		this._sync.time = -1;
 	}
 	
 }
@@ -113,139 +170,328 @@ export class DBClientDatabase{
 	name = "";
 	client:DBClient = null;
 
-	private clientData = {
-		id:"",
-		key:"",
-		url:"",
-		ip:"",
-		sync: {
-			time: -1,
-		}
-	}
-
-	constructor(name:string, client:DBClient, {id,key,ip,sync,url}){
+	constructor(name:string, client:DBClient){
 		this.name = name;
 		this.client = client;
-		this.clientData = {id,key,ip,sync,url};
 	}
 
-	async createPack(name:string, callback = DefaultResponseCallback){
-		let {id,key,url,ip,sync} = this.clientData;
-		
-		try{
-			let res = await request(url, {
-				type: `createPack`,
-				id: id,
-				key: key,
-				time: sync.time,
-				data: {
-					name: name,
-				},
-			});
+	createPack(name:string, callback = DefaultResponseCallback){
+		let socket = this.client.clientSocket;
 
-			callback(null, res);
+		return new Promise((resolve, reject) => {
 
-			return res;
-		}catch(err){
-			callback(err);
-			throw err;
-		}
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
+
+			function onCreatePack(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+	
+					let data = res.data;
+					socket.off(SocketEvent.Create, onCreatePack)
+	
+					callback(null, data);
+					resolve(data);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket.emit(SocketClientEvent.CreatePack, JSON.stringify({
+					id: this.client.id, key: this.client.key,
+					data: {
+						name: name,
+						db: this.client.dbName,
+					},
+					sync,
+				}));
+
+				socket.on(SocketEvent.Create, onCreatePack);
+			}catch(err){
+				callback(err);
+				reject(err);
+			}
+		});
+	}
+
+	deletePack(name:string, callback = DefaultResponseCallback){
+		let socket = this.client.clientSocket;
+
+		return new Promise((resolve, reject) => {
+
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
+
+			function onDeletePack(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+	
+					let data = res.data;
+					socket.off(SocketEvent.Delete, onDeletePack)
+	
+					callback(null, data);
+					resolve(data);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket.emit(SocketClientEvent.DeletePack, JSON.stringify({
+					id: this.client.id, key: this.client.key,
+					data: {
+						name: name,
+						db: this.client.dbName,
+					},
+					sync,
+				}));
+
+				socket.on(SocketEvent.Delete, onDeletePack);
+			}catch(err){
+				callback(err);
+				reject(err);
+			}
+		});
 	}
 
 	pack(name:string){
-		return new DBClientPack(name, this.client, this.clientData);
+		return new DBClientPack(name, this);
 	}
 }
 
 export class DBClientPack{
 	name = "";
-	client:DBClient = null;
+	db:DBClientDatabase = null;
 
-	private clientData = {
-		id:"",
-		key:"",
-		url:"",
-		ip:"",
-		sync: {
-			time: -1,
-		}
+	get client(){
+		if(!this.db) return null;
+		return this.db.client;
 	}
 
-	constructor(name:string, client:DBClient, {id,key,url,ip,sync}){
+	constructor(name:string, db:DBClientDatabase){
 		this.name = name;
-		this.client = client;
-		this.clientData = {id,key,ip,sync,url};
+		this.db = db;
 	}
 
 	//CRUD
-	public async insert(record:JSONObject, callback?:ResponseCallbackType) : Promise<IResponse>;
-	public async insert(records:JSONObject[], callback?:ResponseCallbackType) : Promise<IResponse>;
-	async insert(record:JSONObject|JSONObject[], callback = DefaultResponseCallback){
-		let {id,key,url,ip,sync} = this.clientData;
-		
-		let type = _.isArray(record) ? "insertOne" : "insertMany";
-		try{
-			let res = await request(url, {
-				type: type,
-				id: id,
-				key: key,
-				time: sync.time,
-				data: record,
-			});
+	create(record:JSONObject|JSONObject[], callback = DefaultResponseCallback){
+		let socket = this.client.clientSocket;
+		let pack = this;
 
-			callback(null, res);
+		return new Promise((resolve, reject) => {
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
+			function onCreate(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
 
-			return res;
-		}catch(err){
-			callback(err);
-			throw err;
-		}
+					let data = res.data;
+					socket.off(SocketEvent.Create, onCreate);
+
+					callback(null, data);
+					resolve(data);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket.emit(SocketClientEvent.CreateRec, JSON.stringify({
+					id: this.client.id, key: this.client.key,
+					data: {
+						pack: pack.name,
+						record:record,
+					},
+					sync,
+				}));
+
+				socket.on(SocketEvent.Create, onCreate);
+			}catch (err) {
+				callback(err);
+				reject(err);
+			}
+		});
 	}
-	async selectOne(query:JSONObject, opts:JSONObject,callback = DefaultResponseCallback){
-		let {id,key,url,ip,sync} = this.clientData;
-		
-		try{
-			let res = await request(url, {
-				type: `selectOne`,
-				id: id,
-				key: key,
-				time: sync.time,
-				data: query,
-			});
+	read(query:JSONObject, opts:JSONObject, callback = DefaultResponseCallback){
+		let socket = this.client.clientSocket;
+		let pack = this;
 
-			callback(null, res);
+		return new Promise((resolve, reject) => {
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
 
-			return res;
-		}catch(err){
-			callback(err);
-			throw err;
-		}
+			function onRead(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+
+					let data = res.data;
+					socket.off(SocketEvent.Read, onRead);
+
+					callback(null, data);
+					resolve(data);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket.emit(SocketClientEvent.ReadRec, JSON.stringify({
+					id: this.client.id, key: this.client.key,
+					data: {
+						pack: pack.name,
+						query,
+						options: opts,
+					},
+					sync,
+				}));
+
+				socket.on(SocketEvent.Read, onRead);
+			}catch (err) {
+				callback(err);
+				reject(err);
+			}
+		});
 	}
-	async select(query:JSONObject, opts:JSONObject, callback = DefaultResponseCallback){
-		let {id,key,url,ip,sync} = this.clientData;
-		
-		try{
-			let res = await request(url, {
-				type: `selectMany`,
-				id: id,
-				key: key,
-				time: sync.time,
-				data: query,
-			});
+	update(query:JSONObject, opts:JSONObject, callback = DefaultResponseCallback){
+		let socket = this.client.clientSocket;
+		let pack = this;
 
-			callback(null, res);
+		return new Promise((resolve, reject) => {
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
 
-			return res;
-		}catch(err){
-			callback(err);
-			throw err;
-		}
+			function onUpdate(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+
+					let data = res.data;
+					socket.off(SocketEvent.Update, onUpdate);
+
+					callback(null, data);
+					resolve(data);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket.emit(SocketClientEvent.UpdateRec, JSON.stringify({
+					id: this.client.id, key: this.client.key,
+					data: {
+						pack: pack.name,
+						query, options: opts,
+					},
+					sync,
+				}));
+
+				socket.on(SocketEvent.Update, onUpdate);
+			}catch (err) {
+				callback(err);
+				reject(err);
+			}
+		});
 	}
-	async update(){
+	delete(query:JSONObject, opts:JSONObject, callback = DefaultResponseCallback){
+		let socket = this.client.clientSocket;
+		let pack = this;
 
-	}
-	async delete(){
+		return new Promise((resolve, reject) => {
+			let sync = {
+				time: Date.now(),
+				id: MY.randomID(),
+			}
 
+			function onDelete(str:string){
+				try{
+					let res = JSON.parse(str);
+					if(!res.success){
+						throw new Error(res.message);
+					}
+					if(!verifySync(res.sync?.id, sync.id)){
+						//handle collision
+						return;
+					}
+
+					let data = res.data;
+					socket.off(SocketEvent.Delete, onDelete);
+
+					callback(null, data);
+					resolve(data);
+				}catch(err){
+					callback(err);
+					reject(err);
+				}
+			}
+
+			try{
+				socket.emit(SocketClientEvent.DeleteRec, JSON.stringify({
+					id: this.client.id, key: this.client.key,
+					data: {
+						pack: pack.name,
+						query, options: opts,
+					},
+					sync,
+				}));
+
+				socket.on(SocketEvent.Delete, onDelete);
+			}catch (err) {
+				callback(err);
+				reject(err);
+			}
+		});
 	}
 	
 }
