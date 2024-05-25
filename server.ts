@@ -4,7 +4,7 @@ import express from "express";
 import path from "path";
 
 import * as MY from "@catsums/my";
-import { SocketClientEvent, SocketEvent } from "./interface";
+import { IRecord, SocketClientEvent, SocketEvent } from "./interface";
 import { DBDatabase } from "./database";
 
 const app = express();
@@ -101,6 +101,109 @@ io.on('connection', (socket) => {
 			}));
 		}catch(err){
 			socket.emit(SocketEvent.Create, JSON.stringify({
+				success: false, message: err.message,
+			}));
+		}
+	}).on(SocketClientEvent.DeletePack, async (str:string) => {
+		try{
+			let res = JSON.parse(str);
+
+			let db = client.db;
+			if(res.data.db != db.name){
+				db = await DBDatabase.ReadDatabase(path.resolve(`${res.db}.json`, DBFolderPath));
+				client.db = db;
+			}
+
+			let pack = db.deletePack(res.data.name);
+
+			socket.emit(SocketEvent.Delete, JSON.stringify({
+				success: true,
+				message: `Deleted Pack`,
+				data: {
+					name: pack.name,
+				},
+				sync: {
+					time: Date.now(),
+					id: res.sync.id,
+				},
+			}));
+		}catch(err){
+			socket.emit(SocketEvent.Create, JSON.stringify({
+				success: false, message: err.message,
+			}));
+		}
+	}).on(SocketClientEvent.CreateRec, async (str:string) => {
+		try{
+			let res = JSON.parse(str);
+
+			let db = client.db;
+			if(res.data.db != db.name){
+				db = await DBDatabase.ReadDatabase(path.resolve(`${res.db}.json`, DBFolderPath));
+				client.db = db;
+			}
+
+			let pack = db.getPackByName(res.data.pack);
+
+			let rec = pack.createRecord(res.data.record);
+
+			socket.emit(SocketEvent.Create, JSON.stringify({
+				success: true,
+				message: `Created Rec`,
+				data: {
+					recordID: rec.$id,
+				},
+				sync: {
+					time: Date.now(),
+					id: res.sync.id,
+				},
+			}));
+		}catch(err){
+			socket.emit(SocketEvent.Create, JSON.stringify({
+				success: false, message: err.message,
+			}));
+		}
+	}).on(SocketClientEvent.ReadRec, async (str:string) => {
+		try{
+			let res = JSON.parse(str);
+
+			let db = client.db;
+			if(res.data.db != db.name){
+				db = await DBDatabase.ReadDatabase(path.resolve(`${res.db}.json`, DBFolderPath));
+				client.db = db;
+			}
+
+			let pack = db.getPackByName(res.data.pack);
+			let query = res.data.query;
+			let opts = res.data.options;
+
+			let records:IRecord[] = [];
+			let queryKeys = Object.keys(query);
+			for(let record of Object.values(pack.records)){
+				let checks = 0;
+				for(let key of queryKeys){
+					let val = query[key];
+					if(record[key] == val){
+						checks++;
+					}
+				}
+				if(checks >= queryKeys.length){
+					records.push(record);
+				}
+			}
+
+			socket.emit(SocketEvent.Read, JSON.stringify({
+				success: true,
+				message: `Retrieved Record`,
+				data: {
+					records: records,
+				},
+				sync: {
+					time: Date.now(),
+					id: res.sync.id,
+				},
+			}));
+		}catch(err){
+			socket.emit(SocketEvent.Read, JSON.stringify({
 				success: false, message: err.message,
 			}));
 		}
